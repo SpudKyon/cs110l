@@ -1,8 +1,10 @@
+use std::os::unix::process::CommandExt;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use std::process::Child;
+use std::process::{Child, Command};
+use nix::Error;
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -34,12 +36,13 @@ impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
     pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
-        // TODO: implement me!
-        println!(
-            "Inferior::new not implemented! target={}, args={:?}",
-            target, args
-        );
-        None
+        let child_process = unsafe {
+            Command::new(target)
+                .args(args)
+                .pre_exec(child_traceme)
+        }.spawn().ok()?;
+
+        Some(Inferior { child: child_process })
     }
 
     /// Returns the pid of this inferior.
@@ -58,6 +61,19 @@ impl Inferior {
                 Status::Stopped(signal, regs.rip as usize)
             }
             other => panic!("waitpid returned unexpected status: {:?}", other),
+        })
+    }
+
+    pub fn continue_run(&self, signal: Option<signal::Signal>) -> Result<(), nix::Error> {
+        // When a process that has PTRACE_TRACEME enabled calls exec,
+        // the operating system will load the specified program into the process,
+        // and then (before the new program starts running) it will
+        // pause the process using SIGTRAP. So we use ptrace::cont to wake up it
+        ptrace::cont(self.pid(), signal)?;
+        Ok(match self.wait(None)? {
+            Status::Exited(exit_code) => println!("Child exited (status {})", exit_code),
+            Status::Signaled(signal) => println!("Child exited due to signal {}", signal),
+            Status::Stopped(signal, rip) => println!("Child stopped by signal {} at address {:#x}", signal, rip),
         })
     }
 }
