@@ -64,16 +64,18 @@ impl Inferior {
         })
     }
 
-    pub fn continue_run(&self, signal: Option<signal::Signal>) -> Result<(), nix::Error> {
+    pub fn continue_run(&self, signal: Option<signal::Signal>) -> Result<Status, nix::Error> {
         // When a process that has PTRACE_TRACEME enabled calls exec,
         // the operating system will load the specified program into the process,
         // and then (before the new program starts running) it will
         // pause the process using SIGTRAP. So we use ptrace::cont to wake up it
         ptrace::cont(self.pid(), signal)?;
-        Ok(match self.wait(None)? {
-            Status::Exited(exit_code) => println!("Child exited (status {})", exit_code),
-            Status::Signaled(signal) => println!("Child exited due to signal {}", signal),
-            Status::Stopped(signal, rip) => println!("Child stopped by signal {} at address {:#x}", signal, rip),
-        })
+        self.wait(None)
+    }
+
+    pub fn kill(&mut self) {
+        self.child.kill().unwrap();
+        self.wait(None).unwrap();
+        println!("Killing running inferior (pid {})", self.pid())
     }
 }
