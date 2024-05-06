@@ -4,7 +4,9 @@ use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::process::{Child, Command};
+use libc::ptrace;
 use nix::Error;
+use crate::dwarf_data::DwarfData;
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -69,7 +71,9 @@ impl Inferior {
         // the operating system will load the specified program into the process,
         // and then (before the new program starts running) it will
         // pause the process using SIGTRAP. So we use ptrace::cont to wake up it
-        ptrace::cont(self.pid(), signal)?;
+        let pid = self.pid();
+        ptrace::cont(pid, signal)?;
+        // dbg!("cont success");
         self.wait(None)
     }
 
@@ -77,5 +81,22 @@ impl Inferior {
         self.child.kill().unwrap();
         self.wait(None).unwrap();
         println!("Killing running inferior (pid {})", self.pid())
+    }
+
+    pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        let regs_struct = ptrace::getregs(self.pid())?;
+        let mut instruction_pointer = regs_struct.rip as usize;
+        let mut base_pointer = regs_struct.rbp as usize;
+        loop {
+            let func_name = debug_data.get_function_from_addr(instruction_pointer).unwrap();
+            let line_number = debug_data.get_line_from_addr(instruction_pointer).unwrap();
+            println!("{} ({})", func_name, line_number);
+            if func_name == "main" {
+                break;
+            }
+            instruction_pointer = ptrace::read(self.pid(), (base_pointer + 8) as ptrace::AddressType)? as usize;
+            base_pointer = ptrace::read(self.pid(), base_pointer as ptrace::AddressType)? as  usize;
+        }
+        Ok(())
     }
 }
