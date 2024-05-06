@@ -95,8 +95,24 @@ impl Inferior {
                 break;
             }
             instruction_pointer = ptrace::read(self.pid(), (base_pointer + 8) as ptrace::AddressType)? as usize;
-            base_pointer = ptrace::read(self.pid(), base_pointer as ptrace::AddressType)? as  usize;
+            base_pointer = ptrace::read(self.pid(), base_pointer as ptrace::AddressType)? as usize;
         }
         Ok(())
+    }
+}
+
+impl Status {
+    pub fn print(status: &Self) {
+        match status {
+            Status::Exited(exit_code) => {
+                println!("Child exited (status {})", exit_code);
+            }
+            Status::Signaled(signal) => {
+                println!("Child exited due to signal {}", signal);
+            }
+            Status::Stopped(signal, rip) => {
+                println!("Child stopped by signal {} at address {:#x}", signal, rip) ;
+            },
+        }
     }
 }

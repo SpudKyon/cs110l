@@ -15,7 +15,6 @@ pub struct Debugger {
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
-        // TODO (milestone 3): initialize the DwarfData
         let debug_data = match DwarfData::from_file(target) {
             Ok(val) => val,
             Err(DwarfError::ErrorOpeningFile) => {
@@ -55,19 +54,8 @@ impl Debugger {
                         self.inferior = Some(inferior);
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
-
-                        match self.inferior.as_mut().unwrap().continue_run(None).unwrap() {
-                            Status::Exited(exit_code) => {
-                                println!("Child exited (status {})", exit_code);
-                                self.inferior = None;
-                            }
-                            Status::Signaled(signal) => {
-                                println!("Child exited due to signal {}", signal);
-                                self.inferior = None;
-                            }
-                            Status::Stopped(signal, rip) =>
-                                println!("Child stopped by signal {} at address {:#x}", signal, rip),
-                        }
+                        let status = self.inferior.as_mut().unwrap().continue_run(None).unwrap();
+                        self.print_status(status);
                     } else {
                         println!("Error starting subprocess");
                     }
@@ -78,18 +66,8 @@ impl Debugger {
                             println!("program is not running");
                         }
                         Some(x) => {
-                            match self.inferior.as_mut().unwrap().continue_run(None).unwrap() {
-                                Status::Exited(exit_code) => {
-                                    println!("Child exited (status {})", exit_code);
-                                    self.inferior = None;
-                                }
-                                Status::Signaled(signal) => {
-                                    println!("Child exited due to signal {}", signal);
-                                    self.inferior = None;
-                                }
-                                Status::Stopped(signal, rip) =>
-                                    println!("Child stopped by signal {} at address {:#x}", signal, rip),
-                            }
+                            let status = self.inferior.as_mut().unwrap().continue_run(None).unwrap();
+                            self.print_status(status);
                         }
                     }
                 }
@@ -153,6 +131,19 @@ impl Debugger {
                     }
                 }
             }
+        }
+    }
+
+    pub fn print_status(&mut self, state: Status) {
+        let status = self.inferior.as_mut().unwrap().continue_run(None).unwrap();
+        Status::print(&status);
+        match status {
+            Status::Stopped(_signal, rip) => {
+                let line_number = self.debug_data.get_line_from_addr(rip).unwrap();
+                println!("Stopped at {}", line_number);
+            }
+            Status::Exited(_) => self.inferior = None,
+            Status::Signaled(_) => self.inferior = None,
         }
     }
 }
