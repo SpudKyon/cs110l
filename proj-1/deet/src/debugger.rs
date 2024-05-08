@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::Inferior;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use std::collections::HashMap;
 use crate::inferior::Status;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 
@@ -12,8 +12,9 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
-    breakpoints: HashMap<usize, u8>,
+    breakpoints : HashMap<usize, u8>,
 }
+
 
 impl Debugger {
     /// Initializes the debugger.
@@ -37,13 +38,14 @@ impl Debugger {
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
 
+        let breakpoints = HashMap::new();
         Debugger {
             target: target.to_string(),
             history_path,
             readline,
             inferior: None,
-            debug_data,
-            breakpoints: HashMap::new(),
+            debug_data: debug_data,
+            breakpoints: breakpoints,
         }
     }
 
@@ -85,6 +87,7 @@ impl Debugger {
                         println!("Error starting subprocess");
                     }
                 }
+
                 DebuggerCommand::Continue => {
                     if self.inferior.is_none() {
                         println!("Error: you can not use continue when there is no process running!");
@@ -125,27 +128,39 @@ impl Debugger {
                 }
 
                 DebuggerCommand::Breakpoint(location) => {
-                    if !location.starts_with("*") {
-                        println!("Usage: b|break|breakpoint *address");
+                    let breakpoint_addr;
+                    if location.starts_with("*") {
+                        if let Some(address) = self.parse_address(&location[1..]) {
+                            breakpoint_addr = address;
+                        } else {
+                            println!("Invalid address");
+                            continue;
+                        }
+                    } else if let Some(line) = usize::from_str_radix(&location, 10).ok() {
+                        if let Some(address) = self.debug_data.get_addr_for_line(None, line) {
+                            breakpoint_addr = address;
+                        } else {
+                            println!("Invalid line number");
+                            continue;
+                        }
+                    } else if let Some(address) = self.debug_data.get_addr_for_function(None, &location){
+                        breakpoint_addr = address;
+                    } else {
+                        println!("Usage: b|break|breakpoint *address|line|func");
                         continue;
                     }
 
-                    if let Some(address) = self.parse_address(&location[1..]) {
-                        if self.inferior.is_some() {
-                            if let Some(instruction) = self.inferior.as_mut().unwrap().write_byte(address, 0xcc).ok() {
-                                println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), address);
-                                self.breakpoints.insert(address, instruction);
-                            } else {
-                                println!("Invalid breakpoint address {:#x}", address);
-                            }
+                    if self.inferior.is_some() {
+                        if let Some(instruction) = self.inferior.as_mut().unwrap().write_byte(breakpoint_addr, 0xcc).ok() {
+                            println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), breakpoint_addr);
+                            self.breakpoints.insert(breakpoint_addr, instruction);
                         } else {
-                            // when the inferior is initiated, these breakpoints will be installed
-                            println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), address);
-                            self.breakpoints.insert(address, 0);
+                            println!("Invalid breakpoint address {:#x}", breakpoint_addr);
                         }
                     } else {
-                        println!("Invalid address");
-                        return;
+                        // when the inferior is initiated, these breakpoints will be installed
+                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), breakpoint_addr);
+                        self.breakpoints.insert(breakpoint_addr, 0);
                     }
                 }
             }
