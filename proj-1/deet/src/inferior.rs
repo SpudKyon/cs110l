@@ -1,13 +1,17 @@
-use std::mem::size_of;
-use std::os::unix::process::CommandExt;
+use std::collections::HashMap;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use std::process::{Child, Command};
-use libc::ptrace;
-use nix::Error;
+use std::process::Child;
+use std::process::Command;
+use std::os::unix::process::CommandExt;
 use crate::dwarf_data::DwarfData;
+use std::mem::size_of;
+
+fn align_addr_to_word(addr: usize) -> usize {
+    addr & (-(size_of::<usize>() as isize) as usize)
+}
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -31,10 +35,6 @@ fn child_traceme() -> Result<(), std::io::Error> {
     )))
 }
 
-fn align_addr_to_word(addr: usize) -> usize {
-    addr & (-(size_of::<usize>() as isize) as usize)
-}
-
 pub struct Inferior {
     child: Child,
 }
@@ -42,23 +42,28 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>, break_points: &Vec<usize>) -> Option<Inferior> {
-        let child_process = unsafe {
-            Command::new(target)
-                .args(args)
-                .pre_exec(child_traceme)
-        }.spawn().ok()?;
-        let mut inferior = Inferior{child: child_process};
-
-        for bp in break_points {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &mut HashMap<usize, u8>) -> Option<Inferior> {
+        // TODO: implement me!
+        let mut cmd = Command::new(target);
+        cmd.args(args);
+        unsafe {
+            cmd.pre_exec(child_traceme);
+        }
+        // When a process that has PTRACE_TRACEME enabled calls exec,
+        // the operating system will load the specified program into the process,
+        // and then (before the new program starts running) it will
+        // pause the process using SIGTRAP. So at the time when inferior is returned,
+        // child process is paused.
+        let child = cmd.spawn().ok()?;
+        let mut inferior = Inferior { child: child };
+        // install breakpoints
+        let bps = breakpoints.clone();
+        for bp in bps.keys() {
             match inferior.write_byte(*bp, 0xcc) {
-                Ok(_) => {}
-                Err(_) => {
-                    println!("Invalid breakpoint: {:#x}", bp);
-                }
+                Ok(ori_instr) => {breakpoints.insert(*bp, ori_instr);}
+                Err(_) => println!("Invalid breakpoint address {:#x}", bp),
             }
         }
-
         Some(inferior)
     }
 
@@ -81,36 +86,76 @@ impl Inferior {
         })
     }
 
-    pub fn continue_run(&self, signal: Option<signal::Signal>) -> Result<Status, nix::Error> {
-        // When a process that has PTRACE_TRACEME enabled calls exec,
-        // the operating system will load the specified program into the process,
-        // and then (before the new program starts running) it will
-        // pause the process using SIGTRAP. So we use ptrace::cont to wake up it
-        let pid = self.pid();
-        ptrace::cont(pid, signal)?;
-        // dbg!("cont success");
+    // wake up the paused inferior process
+    // Wake up the paused inferior process, there are two possibilities:
+    // (1) inferior process paused by breakpoints
+    // (2) inferior process paused by other signals (e.g. ctrl + c)
+    pub fn continue_run(&mut self, signal: Option<signal::Signal>, breakpoints: &HashMap<usize, u8>) -> Result<Status, nix::Error> {
+        let mut regs = ptrace::getregs(self.pid())?;
+        let rip = regs.rip as usize;
+        // check if inferior stopped at a breakpoint
+        if let Some(ori_instr) = breakpoints.get(&(rip - 1)) {
+            println!("stopped at a breakpoint");
+            // restore the first byte of the instruction we replaced
+            self.write_byte(rip - 1, *ori_instr).unwrap();
+            // set %rip = %rip - 1 to rewind the instruction pointer
+            regs.rip = (rip - 1) as u64;
+            ptrace::setregs(self.pid(), regs).unwrap();
+            // go to the next instruction
+            ptrace::step(self.pid(), None).unwrap();
+            // wait for inferior to stop due to SIGTRAP, just return if the inferior terminates here
+            match self.wait(None).unwrap() {
+                Status::Exited(exit_code) => return Ok(Status::Exited(exit_code)),
+                Status::Signaled(signal) => return Ok(Status::Signaled(signal)),
+                Status::Stopped(_, _) => {
+                    // restore 0xcc in the breakpoint location
+                    self.write_byte(rip - 1, 0xcc).unwrap();
+                }
+            }
+        }
+        // resume normal execution
+        ptrace::cont(self.pid(), signal)?;
+        // wait for inferior to stop or terminate
         self.wait(None)
     }
 
+    // kill the inferior, assume that the inferior is still alive
     pub fn kill(&mut self) {
         self.child.kill().unwrap();
         self.wait(None).unwrap();
         println!("Killing running inferior (pid {})", self.pid())
     }
 
+
+    // // get the current value of %rip in this inferior process
+    // pub fn get_rip(&self) -> usize {
+    //     let regs = ptrace::getregs(self.pid())?;
+    //     return regs.rip as usize;
+    // }
+
+    // print backtrace of this inferior process
     pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
-        let regs_struct = ptrace::getregs(self.pid())?;
-        let mut instruction_pointer = regs_struct.rip as usize;
-        let mut base_pointer = regs_struct.rbp as usize;
+        let regs = ptrace::getregs(self.pid())?;
+        let mut rip = regs.rip as usize;
+        let mut rbp = regs.rbp as usize;
         loop {
-            let func_name = debug_data.get_function_from_addr(instruction_pointer).unwrap();
-            let line_number = debug_data.get_line_from_addr(instruction_pointer).unwrap();
-            println!("{} ({})", func_name, line_number);
-            if func_name == "main" {
+            let _line = debug_data.get_line_from_addr(rip);
+            let _func = debug_data.get_function_from_addr(rip);
+            match (&_line, &_func) {
+                (None, None) => println!("unknown func (source file not found)"),
+                (Some(line), None) => println!("unknown func ({})", line),
+                (None, Some(func)) => println!("{} (source file not found)", func),
+                (Some(line), Some(func)) => println!("{} ({})", func, line),
+            }
+            if let Some(func) = _func {
+                if func == "main" {
+                    break;
+                }
+            } else {
                 break;
             }
-            instruction_pointer = ptrace::read(self.pid(), (base_pointer + 8) as ptrace::AddressType)? as usize;
-            base_pointer = ptrace::read(self.pid(), base_pointer as ptrace::AddressType)? as usize;
+            rip = ptrace::read(self.pid(), (rbp + 8) as ptrace::AddressType)? as usize;
+            rbp = ptrace::read(self.pid(), rbp as ptrace::AddressType)? as usize;
         }
         Ok(())
     }
@@ -128,21 +173,5 @@ impl Inferior {
             updated_word as *mut std::ffi::c_void,
         )?;
         Ok(orig_byte as u8)
-    }
-}
-
-impl Status {
-    pub fn print(status: &Self) {
-        match status {
-            Status::Exited(exit_code) => {
-                println!("Child exited (status {})", exit_code);
-            }
-            Status::Signaled(signal) => {
-                println!("Child exited due to signal {}", signal);
-            }
-            Status::Stopped(signal, rip) => {
-                println!("Child stopped by signal {} at address {:#x}", signal, rip);
-            }
-        }
     }
 }

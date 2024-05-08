@@ -1,11 +1,9 @@
-use crate::debugger_command::DebuggerCommand::Continue;
-
 pub enum DebuggerCommand {
     Quit,
     Run(Vec<String>),
     Continue,
     Backtrace,
-    Break(String),
+    Breakpoint(String),
 }
 
 impl DebuggerCommand {
@@ -19,10 +17,9 @@ impl DebuggerCommand {
                 ))
             }
             "c" | "cont" | "continue" => Some(DebuggerCommand::Continue),
-            "bt" | "back" | "backtrace" => Some(DebuggerCommand::Backtrace),
-            "b" | "break" => {
-                Some(DebuggerCommand::Break(tokens[1].to_string()))
-            },
+            "bt"| "back" | "backtrace" => Some(DebuggerCommand::Backtrace),
+            "b" | "break" | "breakpoint" => Some(DebuggerCommand::Breakpoint(tokens[1].to_string())),
+
             // Default case:
             _ => None,
         }

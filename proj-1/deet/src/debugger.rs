@@ -1,10 +1,10 @@
-use libc::bsearch;
-use nix::Error;
-use crate::debugger_command::{DebuggerCommand};
-use crate::inferior::{Inferior, Status};
+use std::collections::HashMap;
+use crate::debugger_command::DebuggerCommand;
+use crate::inferior::Inferior;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
-use crate::dwarf_data::{DwarfData, Error as DwarfError, Line};
+use crate::inferior::Status;
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
 
 pub struct Debugger {
     target: String,
@@ -12,12 +12,13 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
-    break_point: Vec<usize>,
+    breakpoints: HashMap<usize, u8>,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
+        // TODO (milestone 3): initialize the DwarfData
         let debug_data = match DwarfData::from_file(target) {
             Ok(val) => val,
             Err(DwarfError::ErrorOpeningFile) => {
@@ -30,6 +31,7 @@ impl Debugger {
             }
         };
         debug_data.print();
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
@@ -41,7 +43,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
-            break_point: Vec::new(),
+            breakpoints: HashMap::new(),
         }
     }
 
@@ -50,73 +52,113 @@ impl Debugger {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
                     if self.inferior.is_some() {
+                        // there is already a inferior running
+                        // if it has not exited, kill it first
                         self.inferior.as_mut().unwrap().kill();
                         self.inferior = None;
                     }
-                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.break_point) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &mut self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
+                        // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
-                        let status = self.inferior.as_mut().unwrap().continue_run(None).unwrap();
-                        self.print_status(status);
+                        match self.inferior.as_mut().unwrap().continue_run(None, &self.breakpoints).unwrap() {
+                            Status::Exited(exit_code) => {
+                                println!("Child exited (status {})", exit_code);
+                                self.inferior = None;
+                            }
+                            Status::Signaled(signal) => {
+                                println!("Child exited due to signal {}", signal);
+                                self.inferior = None;
+                            }
+                            Status::Stopped(signal, rip) => {
+                                println!("Child stopped (signal {})", signal);
+                                let _line = self.debug_data.get_line_from_addr(rip);
+                                let _func = self.debug_data.get_function_from_addr(rip);
+                                if _line.is_some() && _func.is_some() {
+                                    println!("Stopped at {} ({})", _func.unwrap(), _line.unwrap());
+                                }
+                            }
+                        }
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Continue => {
-                    match &self.inferior {
-                        None => {
-                            println!("Program is not running");
-                        }
-                        Some(x) => {
-                            let status = self.inferior.as_mut().unwrap().continue_run(None).unwrap();
-                            self.print_status(status);
-                        }
-                    }
-                }
-                DebuggerCommand::Backtrace => {
                     if self.inferior.is_none() {
-                        println!("Program is not running");
+                        println!("Error: you can not use continue when there is no process running!");
                     } else {
-                        self.inferior.as_mut().unwrap().print_backtrace(&self.debug_data).unwrap()
-                    }
-                }
-                DebuggerCommand::Break(addr_str) => {
-                    if addr_str.starts_with('*') {
-                        let addr = parse_address(&addr_str[1..]);
-                        match addr {
-                            Some(addr_v) => {
-                                if self.inferior.is_some() {
-                                    match self.inferior.as_mut().unwrap().write_byte(addr_v, 0xcc) {
-                                        Ok(_) => {}
-                                        Err(_) => {
-                                            println!("Add break point {:#x} failed", addr_v);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                println!("Set breakpoint {} at {:#x}", self.break_point.len(), addr_v);
-                                self.break_point.push(addr_v);
+                        match self.inferior.as_mut().unwrap().continue_run(None, &self.breakpoints).unwrap() {
+                            Status::Exited(exit_code) => {
+                                println!("Child exited (status {})", exit_code);
+                                self.inferior = None;
                             }
-                            None => println!("Invalid address"),
+                            Status::Signaled(signal) => {
+                                println!("Child exited due to signal {}", signal);
+                                self.inferior = None;
+                            }
+                            Status::Stopped(signal, rip) => {
+                                println!("Child stopped (signal {})", signal);
+                                let _line = self.debug_data.get_line_from_addr(rip);
+                                let _func = self.debug_data.get_function_from_addr(rip);
+                                if _line.is_some() && _func.is_some() {
+                                    println!("Stopped at {} ({})", _func.unwrap(), _line.unwrap());
+                                }
+                            }
                         }
-                    } else {
-                        println!("Break need an address start with \'*\'")
                     }
                 }
                 DebuggerCommand::Quit => {
-                    match &self.inferior {
-                        None => {}
-                        Some(_inferior) => {
-                            self.inferior.as_mut().unwrap().kill();
-                            self.inferior = None;
-                        }
+                    if self.inferior.is_some() {
+                        self.inferior.as_mut().unwrap().kill();
+                        self.inferior = None;
                     }
                     return;
                 }
+                DebuggerCommand::Backtrace => {
+                    if self.inferior.is_none() {
+                        println!("Error: you can not use backtrace when there is no process running");
+                    } else {
+                        self.inferior.as_mut().unwrap().print_backtrace(&self.debug_data).unwrap();
+                    }
+                }
+
+                DebuggerCommand::Breakpoint(location) => {
+                    if !location.starts_with("*") {
+                        println!("Usage: b|break|breakpoint *address");
+                        continue;
+                    }
+
+                    if let Some(address) = self.parse_address(&location[1..]) {
+                        if self.inferior.is_some() {
+                            if let Some(instruction) = self.inferior.as_mut().unwrap().write_byte(address, 0xcc).ok() {
+                                println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), address);
+                                self.breakpoints.insert(address, instruction);
+                            } else {
+                                println!("Invalid breakpoint address {:#x}", address);
+                            }
+                        } else {
+                            // when the inferior is initiated, these breakpoints will be installed
+                            println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), address);
+                            self.breakpoints.insert(address, 0);
+                        }
+                    } else {
+                        println!("Invalid address");
+                        return;
+                    }
+                }
             }
         }
+    }
+
+    fn parse_address(&self, addr: &str) -> Option<usize> {
+        let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
+            &addr[2..]
+        } else {
+            &addr
+        };
+        usize::from_str_radix(addr_without_0x, 16).ok()
     }
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
@@ -159,31 +201,4 @@ impl Debugger {
             }
         }
     }
-
-    pub fn print_status(&mut self, state: Status) {
-        let status = self.inferior.as_mut().unwrap().continue_run(None).unwrap();
-        Status::print(&status);
-        match status {
-            Status::Stopped(_signal, rip) => {
-                let line_number = match self.debug_data.get_line_from_addr(rip) {
-                    None => {}
-                    Some(ln) => {
-                        println!("Stopped at {}", ln);
-                    }
-                };
-
-            }
-            Status::Exited(_) => self.inferior = None,
-            Status::Signaled(_) => self.inferior = None,
-        }
-    }
-}
-
-pub fn parse_address(addr: &str) -> Option<usize> {
-    let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
-        &addr[2..]
-    } else {
-        &addr
-    };
-    usize::from_str_radix(addr_without_0x, 16).ok()
 }
